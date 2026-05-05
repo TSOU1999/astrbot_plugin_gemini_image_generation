@@ -944,6 +944,361 @@ def ai_split_with_rows_cols(
         return []
 
 
+def _build_grid_debug_image(
+    image: np.ndarray,
+    boxes: list[tuple[int, int, int, int]],
+    row_lines: list[int] | None = None,
+    col_lines: list[int] | None = None,
+) -> np.ndarray:
+    """为网格类切分生成调试图，保留切割线与最终框。"""
+    vis = image.copy()
+    if vis.ndim == 2:
+        vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
+
+    if row_lines:
+        for y in row_lines[1:-1]:
+            cv2.line(
+                vis,
+                (0, int(y)),
+                (vis.shape[1] - 1, int(y)),
+                (64, 192, 64),
+                2,
+                lineType=cv2.LINE_AA,
+            )
+    if col_lines:
+        for x in col_lines[1:-1]:
+            cv2.line(
+                vis,
+                (int(x), 0),
+                (int(x), vis.shape[0] - 1),
+                (64, 192, 64),
+                2,
+                lineType=cv2.LINE_AA,
+            )
+
+    for idx, (x, y, w_box, h_box) in enumerate(boxes, 1):
+        cv2.rectangle(
+            vis,
+            (int(x), int(y)),
+            (int(x + w_box - 1), int(y + h_box - 1)),
+            (48, 64, 255),
+            2,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.putText(
+            vis,
+            str(idx),
+            (int(x) + 8, int(y) + 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (48, 64, 255),
+            2,
+            lineType=cv2.LINE_AA,
+        )
+    return vis
+
+
+def _collect_projection_bands(
+    projection: np.ndarray,
+    threshold: float,
+    *,
+    edge_margin: int = 0,
+) -> list[tuple[int, int, int, float]]:
+    """从一维投影里提取连续峰带，返回 start/end/center/score。"""
+    if projection.size == 0:
+        return []
+
+    mask = projection >= threshold
+    bands: list[tuple[int, int, int, float]] = []
+    start: int | None = None
+
+    for idx, flag in enumerate(mask):
+        if flag and start is None:
+            start = idx
+        elif not flag and start is not None:
+            end = idx
+            peak_rel = int(np.argmax(projection[start:end]))
+            center = start + peak_rel
+            if edge_margin <= center < len(projection) - edge_margin:
+                bands.append((start, end - 1, center, float(projection[center])))
+            start = None
+
+    if start is not None:
+        end = len(mask)
+        peak_rel = int(np.argmax(projection[start:end]))
+        center = start + peak_rel
+        if edge_margin <= center < len(projection) - edge_margin:
+            bands.append((start, end - 1, center, float(projection[center])))
+
+    return bands
+
+
+def _detect_solid_grid_boxes(
+    source_img: np.ndarray,
+    *,
+    min_rows: int = 2,
+    min_cols: int = 2,
+    max_rows: int = 6,
+    max_cols: int = 6,
+) -> tuple[list[tuple[int, int, int, int]], list[int], list[int], np.ndarray] | None:
+    """检测带黑色实线分隔的规则网格图。"""
+    if source_img.ndim != 3:
+        return None
+
+    h, w = source_img.shape[:2]
+    if h < 200 or w < 200:
+        return None
+
+    gray = cv2.cvtColor(source_img[:, :, :3], cv2.COLOR_BGR2GRAY)
+    border_samples = np.concatenate(
+        [gray[0, :], gray[-1, :], gray[:, 0], gray[:, -1]]
+    ).astype(np.float32)
+    bg_level = float(np.quantile(border_samples, 0.75))
+    ink_level = float(np.quantile(gray.astype(np.float32), 0.08))
+    contrast = max(0.0, bg_level - ink_level)
+    white_ratio = float((gray >= bg_level - max(8.0, contrast * 0.08)).mean())
+    if white_ratio < 0.22 or contrast < 48.0:
+        return None
+
+    dark_thr = bg_level - max(10.0, contrast * 0.58)
+    dark = ((gray <= dark_thr) * 255).astype(np.uint8)
+    h_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (max(31, w // 4), 1),
+    )
+    v_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (1, max(31, h // 4)),
+    )
+    hori = cv2.morphologyEx(dark, cv2.MORPH_OPEN, h_kernel)
+    vert = cv2.morphologyEx(dark, cv2.MORPH_OPEN, v_kernel)
+
+    hproj = hori.mean(axis=1).astype(np.float32)
+    vproj = vert.mean(axis=0).astype(np.float32)
+
+    h_pos = hproj[hproj > 0]
+    v_pos = vproj[vproj > 0]
+    if len(h_pos) == 0 or len(v_pos) == 0:
+        return None
+
+    h_support = float(len(h_pos)) / float(len(hproj))
+    v_support = float(len(v_pos)) / float(len(vproj))
+    h_q = min(0.999, max(0.9, 1.0 - h_support * 0.75))
+    v_q = min(0.999, max(0.9, 1.0 - v_support * 0.75))
+    h_thresh = max(float(hproj.max()) * 0.5, float(np.quantile(hproj, h_q)))
+    v_thresh = max(float(vproj.max()) * 0.5, float(np.quantile(vproj, v_q)))
+    hbands = _collect_projection_bands(
+        hproj,
+        h_thresh,
+    )
+    vbands = _collect_projection_bands(
+        vproj,
+        v_thresh,
+    )
+
+    edge_margin_y = max(4, int(round(h * 0.02)))
+    edge_margin_x = max(4, int(round(w * 0.02)))
+    hbands = [band for band in hbands if edge_margin_y < band[2] < h - edge_margin_y]
+    vbands = [band for band in vbands if edge_margin_x < band[2] < w - edge_margin_x]
+    hbands = sorted(hbands, key=lambda item: item[2])
+    vbands = sorted(vbands, key=lambda item: item[2])
+
+    row_count = len(hbands) + 1
+    col_count = len(vbands) + 1
+    if row_count < min_rows or col_count < min_cols:
+        return None
+    if row_count > max_rows or col_count > max_cols:
+        return None
+
+    row_lines = [0, *[band[2] for band in hbands], h]
+    col_lines = [0, *[band[2] for band in vbands], w]
+    row_heights = np.diff(np.array(row_lines, dtype=np.float32))
+    col_widths = np.diff(np.array(col_lines, dtype=np.float32))
+    if np.min(row_heights) < h * 0.08 or np.min(col_widths) < w * 0.08:
+        return None
+    row_cv = float(np.std(row_heights) / (np.mean(row_heights) + 1e-6))
+    col_cv = float(np.std(col_widths) / (np.mean(col_widths) + 1e-6))
+    allowed_cv = 0.1 + 0.08 / max(1, min(row_count, col_count) - 1)
+    if row_cv > allowed_cv or col_cv > allowed_cv:
+        return None
+
+    median_h_band = float(
+        np.median([band_end - band_start + 1 for band_start, band_end, _, _ in hbands])
+    )
+    median_v_band = float(
+        np.median([band_end - band_start + 1 for band_start, band_end, _, _ in vbands])
+    )
+    band_pad_y = max(1, int(round(median_h_band * 0.35)))
+    band_pad_x = max(1, int(round(median_v_band * 0.35)))
+
+    row_spans: list[tuple[int, int]] = []
+    prev_end = 0
+    for band_start, band_end, _, _ in hbands:
+        safe_start = max(prev_end, band_start - band_pad_y)
+        row_spans.append((prev_end, safe_start))
+        prev_end = min(h, band_end + 1 + band_pad_y)
+    row_spans.append((prev_end, h))
+
+    col_spans: list[tuple[int, int]] = []
+    prev_end = 0
+    for band_start, band_end, _, _ in vbands:
+        safe_start = max(prev_end, band_start - band_pad_x)
+        col_spans.append((prev_end, safe_start))
+        prev_end = min(w, band_end + 1 + band_pad_x)
+    col_spans.append((prev_end, w))
+
+    if any((y2 - y1) <= h * 0.06 for y1, y2 in row_spans):
+        return None
+    if any((x2 - x1) <= w * 0.06 for x1, x2 in col_spans):
+        return None
+
+    boxes: list[tuple[int, int, int, int]] = []
+    for y1, y2 in row_spans:
+        for x1, x2 in col_spans:
+            boxes.append((int(x1), int(y1), int(x2 - x1), int(y2 - y1)))
+
+    if len(boxes) != row_count * col_count:
+        return None
+
+    return (
+        boxes,
+        row_lines,
+        col_lines,
+        _build_grid_debug_image(
+            source_img,
+            boxes,
+            row_lines,
+            col_lines,
+        ),
+    )
+
+
+def _detect_dashed_grid_boxes(
+    source_img: np.ndarray,
+    *,
+    target_rows: int = 4,
+    target_cols: int = 4,
+) -> tuple[list[tuple[int, int, int, int]], list[int], list[int], np.ndarray] | None:
+    """检测带黑色虚线分隔的规则表情包大图。"""
+    if source_img.ndim != 3:
+        return None
+
+    h, w = source_img.shape[:2]
+    if h < 240 or w < 600 or target_rows < 2 or target_cols < 2:
+        return None
+
+    gray = cv2.cvtColor(source_img[:, :, :3], cv2.COLOR_BGR2GRAY)
+    if float((gray >= 245).mean()) < 0.45:
+        return None
+
+    dark = ((gray < 200) * 255).astype(np.uint8)
+
+    close_y = max(9, h // 64)
+    close_x = max(9, w // 96)
+    vert = cv2.morphologyEx(
+        dark,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, close_y)),
+    )
+    vert = cv2.morphologyEx(
+        vert,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, max(31, h // 2))),
+    )
+    hori = cv2.morphologyEx(
+        dark,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (close_x, 3)),
+    )
+    hori = cv2.morphologyEx(
+        hori,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (max(31, w // 2), 3)),
+    )
+
+    vproj = vert.mean(axis=0).astype(np.float32)
+    hproj = hori.mean(axis=1).astype(np.float32)
+    v_thresh = max(140.0, float(vproj.max()) * 0.65)
+    h_thresh = max(140.0, float(hproj.max()) * 0.65)
+
+    vbands = _collect_projection_bands(
+        vproj,
+        v_thresh,
+        edge_margin=max(24, int(w * 0.05)),
+    )
+    hbands = _collect_projection_bands(
+        hproj,
+        h_thresh,
+        edge_margin=max(24, int(h * 0.05)),
+    )
+    if len(vbands) != target_cols - 1 or len(hbands) != target_rows - 1:
+        return None
+
+    vbands = sorted(vbands, key=lambda item: item[2])
+    hbands = sorted(hbands, key=lambda item: item[2])
+    vcenters = [band[2] for band in vbands]
+    hcenters = [band[2] for band in hbands]
+    vintervals = np.diff(np.array(vcenters, dtype=np.float32))
+    hintervals = np.diff(np.array(hcenters, dtype=np.float32))
+    if len(vintervals) != target_cols - 2 or len(hintervals) != target_rows - 2:
+        return None
+    if (
+        float(np.std(vintervals) / (np.mean(vintervals) + 1e-6)) > 0.12
+        or float(np.std(hintervals) / (np.mean(hintervals) + 1e-6)) > 0.12
+    ):
+        return None
+    if np.min(vintervals) < w * 0.12 or np.min(hintervals) < h * 0.12:
+        return None
+
+    band_pad_y = max(1, min(4, h // 320))
+    band_pad_x = max(1, min(4, w // 480))
+
+    row_spans: list[tuple[int, int]] = []
+    prev_end = 0
+    for band_start, band_end, _, _ in hbands:
+        safe_start = max(prev_end, band_start - band_pad_y)
+        row_spans.append((prev_end, safe_start))
+        prev_end = min(h, band_end + 1 + band_pad_y)
+    row_spans.append((prev_end, h))
+
+    col_spans: list[tuple[int, int]] = []
+    prev_end = 0
+    for band_start, band_end, _, _ in vbands:
+        safe_start = max(prev_end, band_start - band_pad_x)
+        col_spans.append((prev_end, safe_start))
+        prev_end = min(w, band_end + 1 + band_pad_x)
+    col_spans.append((prev_end, w))
+
+    if len(row_spans) != target_rows or len(col_spans) != target_cols:
+        return None
+    if any(y2 - y1 <= 20 for y1, y2 in row_spans):
+        return None
+    if any(x2 - x1 <= 20 for x1, x2 in col_spans):
+        return None
+
+    row_lines = [0, *hcenters, h]
+    col_lines = [0, *vcenters, w]
+    boxes: list[tuple[int, int, int, int]] = []
+    for y1, y2 in row_spans:
+        for x1, x2 in col_spans:
+            if x2 - x1 > 20 and y2 - y1 > 20:
+                boxes.append((int(x1), int(y1), int(x2 - x1), int(y2 - y1)))
+    if len(boxes) != target_rows * target_cols:
+        return None
+
+    return (
+        boxes,
+        row_lines,
+        col_lines,
+        _build_grid_debug_image(
+            source_img,
+            boxes,
+            row_lines,
+            col_lines,
+        ),
+    )
+
+
 async def resolve_split_source_to_path(
     source: str,
     *,
@@ -1020,8 +1375,67 @@ def split_image(
             logger.error(f"无法读取图像: {image_path}")
             return []
 
+        def trim_viewer_chrome(source_img: np.ndarray) -> np.ndarray:
+            """裁掉截图中明显的看图器边框/留白，避免退化成机械等分。"""
+            if source_img.ndim != 3 or source_img.shape[0] < 200:
+                return source_img
+
+            gray = cv2.cvtColor(source_img[:, :, :3], cv2.COLOR_BGR2GRAY)
+            h, w = gray.shape
+            white_ratio = (gray >= 245).mean(axis=1)
+            content_rows = np.where(white_ratio > 0.18)[0]
+            if len(content_rows) == 0:
+                return source_img
+
+            y0 = int(content_rows.min())
+            y1 = int(content_rows.max()) + 1
+
+            # 仅在上下确实存在较厚非内容条带时才裁，避免误伤正常图。
+            if y0 < max(24, int(h * 0.02)) and (h - y1) < max(24, int(h * 0.02)):
+                return source_img
+
+            if y0 <= 0 and y1 >= h:
+                return source_img
+
+            if y0 >= int(h * 0.18) or (h - y1) >= int(h * 0.18):
+                return source_img
+
+            trimmed = source_img[y0:y1].copy()
+            x0 = 0
+            x1 = trimmed.shape[1]
+
+            trimmed_gray = cv2.cvtColor(trimmed[:, :, :3], cv2.COLOR_BGR2GRAY)
+            col_white_ratio = (trimmed_gray >= 245).mean(axis=0)
+            non_blank_cols = np.where(col_white_ratio < 0.999)[0]
+            if len(non_blank_cols) > 0:
+                x0 = int(non_blank_cols.min())
+                x1 = int(non_blank_cols.max()) + 1
+                left_blank = x0
+                right_blank = trimmed_gray.shape[1] - x1
+                if (
+                    left_blank >= max(20, int(trimmed_gray.shape[1] * 0.015))
+                    and right_blank >= max(20, int(trimmed_gray.shape[1] * 0.015))
+                    and left_blank <= int(trimmed_gray.shape[1] * 0.08)
+                    and right_blank <= int(trimmed_gray.shape[1] * 0.08)
+                ):
+                    trimmed = trimmed[:, x0:x1].copy()
+                else:
+                    x0 = 0
+                    x1 = trimmed_gray.shape[1]
+            logger.debug(
+                "检测到截图边框，自动裁边: "
+                f"x0={x0}, x1={x1}, y0={y0}, y1={y1}, 原始尺寸={w}x{h}, "
+                f"新尺寸={trimmed.shape[1]}x{trimmed.shape[0]}"
+            )
+            return trimmed
+
+        img = trim_viewer_chrome(img)
+
         sticker_crops: list[np.ndarray] | None = None
         sticker_debug: np.ndarray | None = None
+        grid_debug: np.ndarray | None = None
+        grid_row_lines: list[int] = []
+        grid_col_lines: list[int] = []
 
         def estimate_global_background_color(source_img: np.ndarray) -> np.ndarray:
             """从整张源图估计统一背景色，供所有切片共用。"""
@@ -1087,6 +1501,56 @@ def split_image(
                         manual_boxes.append((x1, y1, box_w, box_h))
             return manual_boxes
 
+        def looks_like_dense_sticker_sheet(source_img: np.ndarray) -> bool:
+            """判断是否像规则表情包大图，适合优先尝试 4x4 网格。"""
+            h, w = source_img.shape[:2]
+            if h < 600 or w < 900:
+                return False
+
+            gray = cv2.cvtColor(source_img[:, :, :3], cv2.COLOR_BGR2GRAY)
+            dark = gray < 220
+            row_dark = dark.mean(axis=1)
+            col_dark = dark.mean(axis=0)
+            strong_rows = int(np.count_nonzero(row_dark > 0.12))
+            strong_cols = int(np.count_nonzero(col_dark > 0.12))
+            return strong_rows >= 2 and strong_cols >= 3
+
+        def looks_like_explicit_grid_sheet(
+            source_img: np.ndarray,
+            detected_boxes: list[tuple[int, int, int, int]],
+            row_lines: list[int],
+            col_lines: list[int],
+        ) -> bool:
+            """判断图像是否是带明显分隔线的规则网格表情包。"""
+            if len(detected_boxes) < 9 or len(row_lines) < 4 or len(col_lines) < 4:
+                return False
+
+            widths = np.diff(np.array(col_lines, dtype=np.float32))
+            heights = np.diff(np.array(row_lines, dtype=np.float32))
+            areas = np.array([w * h for _, _, w, h in detected_boxes], dtype=np.float32)
+            if len(widths) == 0 or len(heights) == 0 or len(areas) == 0:
+                return False
+
+            width_cv = float(np.std(widths) / (np.mean(widths) + 1e-6))
+            height_cv = float(np.std(heights) / (np.mean(heights) + 1e-6))
+            area_cv = float(np.std(areas) / (np.mean(areas) + 1e-6))
+            if width_cv > 0.25 or height_cv > 0.2 or area_cv > 0.25:
+                return False
+
+            gray = cv2.cvtColor(source_img[:, :, :3], cv2.COLOR_BGR2GRAY)
+            dark = gray < 220
+            line_scores: list[float] = []
+            for y in row_lines[1:-1]:
+                y0 = max(0, y - 1)
+                y1 = min(gray.shape[0], y + 2)
+                line_scores.append(float(dark[y0:y1, :].mean()))
+            for x in col_lines[1:-1]:
+                x0 = max(0, x - 1)
+                x1 = min(gray.shape[1], x + 2)
+                line_scores.append(float(dark[:, x0:x1].mean()))
+
+            return bool(line_scores) and max(line_scores) < 0.02
+
         # 若传入外部裁剪框则优先使用，避免重复跑智能切分
         boxes: list[tuple[int, int, int, int]] = []
         if bboxes:
@@ -1119,11 +1583,52 @@ def split_image(
             if boxes:
                 logger.debug(f"使用外部提供的裁剪框，共 {len(boxes)} 个")
 
+        precomputed_grid_boxes: list[tuple[int, int, int, int]] = []
+        if not boxes and not (manual_rows and manual_cols):
+            grid_splitter = SmartMemeSplitter()
+            precomputed_grid_boxes = grid_splitter.detect_grid(img, debug=True)
+            if looks_like_explicit_grid_sheet(
+                img,
+                precomputed_grid_boxes,
+                grid_splitter.last_row_lines,
+                grid_splitter.last_col_lines,
+            ):
+                boxes = precomputed_grid_boxes
+                logger.debug(
+                    f"检测到显式网格表情包，优先使用网格切分，共 {len(boxes)} 个裁剪框"
+                )
+
+        if not boxes:
+            solid_grid = _detect_solid_grid_boxes(img)
+            if solid_grid is not None:
+                boxes, grid_row_lines, grid_col_lines, grid_debug = solid_grid
+                logger.debug(
+                    f"检测到黑色实线规则表情包，优先使用显式网格切分，共 {len(boxes)} 个裁剪框"
+                )
+
         # 手动切割优先级：外部裁剪框 > 手动指定 > AI > 智能切分
         if not boxes and manual_rows and manual_cols:
             boxes = generate_manual_boxes(manual_rows, manual_cols)
             if boxes:
                 logger.debug(f"使用手动网格裁剪: {manual_cols} x {manual_rows}")
+
+        if not boxes and looks_like_dense_sticker_sheet(img):
+            dashed_grid = _detect_dashed_grid_boxes(img, target_rows=4, target_cols=4)
+            if dashed_grid is not None:
+                boxes, grid_row_lines, grid_col_lines, grid_debug = dashed_grid
+                logger.debug("检测到黑色虚线规则表情包，优先使用虚线 4x4 网格切分")
+            else:
+                ai_files = ai_split_with_rows_cols(
+                    image_path,
+                    4,
+                    4,
+                    final_output_dir,
+                    base_name,
+                    img,
+                )
+                if ai_files:
+                    logger.debug("检测到规则表情包大图，优先使用智能 4x4 网格切分")
+                    return ai_files
 
         # AI 行列切割（可选），在没有手动网格时尝试
         if not boxes and ai_rows and ai_cols and ai_rows > 0 and ai_cols > 0:
@@ -1156,8 +1661,11 @@ def split_image(
 
         # 如果没有外部裁剪框或手动网格，则使用 SmartMemeSplitter 进行智能切分
         if not boxes and not sticker_crops:
-            splitter = SmartMemeSplitter()
-            boxes = splitter.detect_grid(img, debug=True)
+            if precomputed_grid_boxes:
+                boxes = precomputed_grid_boxes
+            else:
+                splitter = SmartMemeSplitter()
+                boxes = splitter.detect_grid(img, debug=True)
 
         # 网格切分仍失败时，再次尝试黑描边自适应切分
         if not boxes and not sticker_crops:
@@ -1193,13 +1701,23 @@ def split_image(
                     cv2.rectangle(mask, (x, y), (x + w_box, y + h_box), 255, 2)
                 mask_file = final_output_dir / f"{base_name}_mask.png"
                 cv2.imwrite(str(mask_file), mask)
+                if grid_debug is None:
+                    grid_debug = _build_grid_debug_image(
+                        img,
+                        boxes,
+                        grid_row_lines,
+                        grid_col_lines,
+                    )
+                if grid_debug is not None:
+                    debug_file = final_output_dir / f"{base_name}_debug.png"
+                    cv2.imwrite(str(debug_file), grid_debug)
             except Exception as e:
                 logger.debug(f"生成掩码预览失败: {e}")
 
             # 保存智能切分结果
+            tight_grid_boxes = bool(grid_row_lines and grid_col_lines)
             for idx, (x, y, w, h) in enumerate(boxes, 1):
-                # 添加2像素padding
-                pad = 2
+                pad = 0 if tight_grid_boxes else 2
                 x1 = max(0, x - pad)
                 y1 = max(0, y - pad)
                 x2 = min(img.shape[1], x + w + pad)
