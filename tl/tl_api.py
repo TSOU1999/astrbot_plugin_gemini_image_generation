@@ -884,6 +884,7 @@ class GeminiAPIClient:
                         "minimax",
                         "stepfun",
                         "sensenova",
+                        "apimart",
                     }:
                         provider = get_api_provider(api_type)
                         return await provider.parse_response(

@@ -1,0 +1,120 @@
+import asyncio
+from typing import Any
+
+import aiohttp
+
+from ..api_types import APIError, ApiRequestConfig
+from .base import ApiProvider, ProviderRequest
+
+class ApimartProvider:
+    name: str = "apimart"
+
+    async def build_request(
+        self, *, client: Any, config: ApiRequestConfig
+    ) -> ProviderRequest:
+        api_base = (config.api_base or "https://api.apimart.ai").rstrip("/")
+        url = f"{api_base}/v1/images/generations"
+
+        api_key = config.api_key
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "model": config.model or "gpt-image-2",
+            "prompt": config.prompt,
+            "n": 1,
+        }
+
+        if config.aspect_ratio:
+            payload["size"] = config.aspect_ratio
+
+        if config.resolution:
+            payload["resolution"] = config.resolution.lower()
+
+        if config.reference_images:
+            # Apimart allows up to 16 reference images
+            payload["image_urls"] = config.reference_images[:16]
+
+        return ProviderRequest(url=url, headers=headers, payload=payload)
+
+    async def parse_response(
+        self,
+        *,
+        client: Any,
+        response_data: dict[str, Any],
+        session: aiohttp.ClientSession,
+        api_base: str | None = None,
+        http_status: int | None = None,
+    ) -> tuple[list[str], list[str], str | None, str | None]:
+        try:
+            task_id = response_data["data"][0]["task_id"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise APIError(
+                f"apimart 响应格式异常，未找到 task_id: {response_data}",
+                error_type="invalid_response"
+            ) from e
+
+        base = (api_base or "https://api.apimart.ai").rstrip("/")
+        task_url = f"{base}/v1/tasks/{task_id}"
+
+        # Fetch API Key for polling using the client method
+        api_key = await client.get_next_api_key()
+        headers = {"Authorization": f"Bearer {api_key}"}
+
+        # Wait before first polling
+        await asyncio.sleep(15)
+
+        for attempt in range(25):  # Max 25 attempts, 5s each (~125s total)
+            async with session.get(task_url, headers=headers) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    raise APIError(
+                        f"apimart 轮询失败: HTTP {resp.status} - {error_text}",
+                        resp.status,
+                        retryable=False
+                    )
+                try:
+                    data = await resp.json()
+                except Exception as e:
+                    raise APIError(
+                        "apimart 轮询响应解析失败",
+                        resp.status,
+                        retryable=False
+                    ) from e
+
+            status = data.get("data", {}).get("status")
+
+            if status == "completed":
+                try:
+                    image_url = data["data"]["result"]["images"][0]["url"][0]
+                    
+                    # Download image to local
+                    from ..tl_utils import save_image_data
+                    async with session.get(image_url) as img_resp:
+                        if img_resp.status == 200:
+                            img_data = await img_resp.read()
+                            local_path = await save_image_data(img_data)
+                            if local_path:
+                                return [], [local_path], None, None
+                    
+                    return [image_url], [], None, None
+                except (KeyError, IndexError) as e:
+                    raise APIError(
+                        f"apimart completed 但图片路径异常: {data}",
+                        error_type="invalid_response"
+                    ) from e
+
+            if status == "failed":
+                error_msg = data.get("data", {}).get("error", {}).get("message", "未知错误")
+                raise APIError(f"apimart 生图失败: {error_msg}", retryable=False)
+
+            # status is submitted or processing, continue polling
+            await asyncio.sleep(5)
+
+        raise APIError(
+            f"apimart 生图超时，task_id={task_id}",
+            error_type="timeout",
+            retryable=True
+        )

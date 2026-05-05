@@ -18,6 +18,7 @@ from .sensenova import SenseNovaProvider
 from .stepfun import StepfunProvider
 from .xai import XAIProvider
 from .zai import ZaiProvider
+from .apimart import ApimartProvider
 
 _DOUBAO: Final[DoubaoProvider] = DoubaoProvider()
 _GOOGLE: Final[GoogleProvider] = GoogleProvider()
@@ -29,6 +30,7 @@ _SENSENOVA: Final[SenseNovaProvider] = SenseNovaProvider()
 _STEPFUN: Final[StepfunProvider] = StepfunProvider()
 _XAI: Final[XAIProvider] = XAIProvider()
 _ZAI: Final[ZaiProvider] = ZaiProvider()
+_APIMART: Final[ApimartProvider] = ApimartProvider()
 
 # canonical api_type -> provider 映射表（与 _conf_schema.json 中 api_type.options 严格一致）
 _PROVIDERS: Final[dict[str, ApiProvider]] = {
@@ -42,6 +44,7 @@ _PROVIDERS: Final[dict[str, ApiProvider]] = {
     "zai": _ZAI,
     "grok2api": _GROK2API,
     "doubao": _DOUBAO,
+    "apimart": _APIMART,
 }
 
 
