@@ -87,10 +87,24 @@ class ApimartProvider:
         api_key = await client.get_next_api_key()
         headers = {"Authorization": f"Bearer {api_key}"}
 
-        # Wait before first polling
-        await asyncio.sleep(15)
+        # 从配置中获取轮询参数，如果未配置或不是字典，则使用默认值
+        provider_config = getattr(client, "_plugin_config", {}).get("api_settings", {}).get("provider_overrides", {})
+        if isinstance(provider_config, list):
+             # Try to find apimart config in the list of dicts
+             apimart_cfg = next((c for c in provider_config if c.get("id") == "apimart"), {})
+        else:
+             apimart_cfg = provider_config.get("apimart", {}) if isinstance(provider_config, dict) else {}
 
-        for attempt in range(25):  # Max 25 attempts, 5s each (~125s total)
+        # AstrBot passes plugin config via client._plugin_config in some architectures, 
+        # but to be safe, we can also extract it from kwargs or use defaults
+        initial_wait = int(apimart_cfg.get("poll_initial_wait", 15))
+        poll_interval = int(apimart_cfg.get("poll_interval", 5))
+        max_attempts = int(apimart_cfg.get("poll_max_attempts", 60))
+
+        # Wait before first polling
+        await asyncio.sleep(initial_wait)
+
+        for attempt in range(max_attempts):
             async with session.get(task_url, headers=headers) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -135,7 +149,7 @@ class ApimartProvider:
                 raise APIError(f"apimart 生图失败: {error_msg}", retryable=False)
 
             # status is submitted or processing, continue polling
-            await asyncio.sleep(5)
+            await asyncio.sleep(poll_interval)
 
         raise APIError(
             f"apimart 生图超时，task_id={task_id}",

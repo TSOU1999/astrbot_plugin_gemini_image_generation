@@ -684,6 +684,24 @@
                 "type": "string",
                 "hint": "填写即启用代理，留空使用全局代理或环境变量。支持 http://host:port、https://host:port、socks5://host:port 格式。优先级高于全局代理和环境变量",
                 "default": ""
+              },
+              "poll_initial_wait": {
+                "description": "轮询首次等待时间（秒）",
+                "type": "int",
+                "hint": "提交任务后，等待多久开始第一次查询状态",
+                "default": 15
+              },
+              "poll_interval": {
+                "description": "轮询间隔时间（秒）",
+                "type": "int",
+                "hint": "每次查询之间的等待时间",
+                "default": 5
+              },
+              "poll_max_attempts": {
+                "description": "轮询最大尝试次数",
+                "type": "int",
+                "hint": "最多查询多少次，超过次数将视为超时。默认 60 次（约 5 分钟）",
+                "default": 60
               }
             }
           }
