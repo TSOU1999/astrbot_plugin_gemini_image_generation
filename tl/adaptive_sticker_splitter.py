@@ -132,7 +132,9 @@ class AdaptiveStickerSplitter:
             ]
             max_gap_ratio, max_gap_idx = max(gaps)
             if max_gap_ratio >= 2.0:
-                threshold = (areas_sorted[max_gap_idx] + areas_sorted[max_gap_idx + 1]) / 2
+                threshold = (
+                    areas_sorted[max_gap_idx] + areas_sorted[max_gap_idx + 1]
+                ) / 2
             else:
                 threshold = h * w * 0.01
         else:
@@ -156,7 +158,9 @@ class AdaptiveStickerSplitter:
                 kept.append((int(y), int(x)))
         return kept
 
-    def _auto_peaks(self, dist: np.ndarray, cc_mask: np.ndarray) -> list[tuple[int, int]]:
+    def _auto_peaks(
+        self, dist: np.ndarray, cc_mask: np.ndarray
+    ) -> list[tuple[int, int]]:
         h, w = dist.shape[:2]
         dt_max = float(dist.max())
         if dt_max < 3.0:
@@ -190,11 +194,15 @@ class AdaptiveStickerSplitter:
         return self._nms(all_coords, lo)
 
     @staticmethod
-    def _component_peaks(mask: np.ndarray, peaks: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    def _component_peaks(
+        mask: np.ndarray, peaks: list[tuple[int, int]]
+    ) -> list[tuple[int, int]]:
         return [(py, px) for py, px in peaks if mask[py, px]]
 
     @staticmethod
-    def _largest_peak_component(mask: np.ndarray, peaks: list[tuple[int, int]]) -> np.ndarray:
+    def _largest_peak_component(
+        mask: np.ndarray, peaks: list[tuple[int, int]]
+    ) -> np.ndarray:
         binary = (mask > 0).astype(np.uint8)
         n_cc, cc_labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
         best_mask = None
@@ -291,7 +299,9 @@ class AdaptiveStickerSplitter:
 
         return {1: binary > 0}
 
-    def _fluid_split(self, cc_mask: np.ndarray, peaks: list[tuple[int, int]]) -> np.ndarray:
+    def _fluid_split(
+        self, cc_mask: np.ndarray, peaks: list[tuple[int, int]]
+    ) -> np.ndarray:
         h, w = cc_mask.shape[:2]
         dist = cv2.distanceTransform(cc_mask, cv2.DIST_L2, 5)
         dt_max = float(dist.max())
@@ -350,7 +360,8 @@ class AdaptiveStickerSplitter:
             for y, x in zip(uy, ux):
                 best_li = min(
                     centroids,
-                    key=lambda li: (x - centroids[li][0]) ** 2 + (y - centroids[li][1]) ** 2,
+                    key=lambda li: (x - centroids[li][0]) ** 2
+                    + (y - centroids[li][1]) ** 2,
                 )
                 result[y, x] = best_li
 
@@ -389,13 +400,17 @@ class AdaptiveStickerSplitter:
         return owner
 
     @staticmethod
-    def _fill_sparse_holes(labels: np.ndarray, cc_mask: np.ndarray, n_labels: int) -> np.ndarray:
+    def _fill_sparse_holes(
+        labels: np.ndarray, cc_mask: np.ndarray, n_labels: int
+    ) -> np.ndarray:
         filled = labels.copy()
         kernel = np.ones((3, 3), np.uint8)
         for _ in range(12):
             prev = filled.copy()
             for li in range(1, n_labels + 1):
-                dilated = cv2.dilate((filled == li).astype(np.uint8), kernel, iterations=1)
+                dilated = cv2.dilate(
+                    (filled == li).astype(np.uint8), kernel, iterations=1
+                )
                 filled[(dilated > 0) & cc_mask & (filled == 0)] = li
             if np.array_equal(prev, filled):
                 break
@@ -414,7 +429,9 @@ class AdaptiveStickerSplitter:
         for thr in [25, 30, 35, 40, 45]:
             dark = (gray_norm <= (thr / 255.0)) & cc_mask
             carved = cc_mask & (~dark)
-            n_cc, cc_labels, stats, _ = cv2.connectedComponentsWithStats(carved.astype(np.uint8), 8)
+            n_cc, cc_labels, stats, _ = cv2.connectedComponentsWithStats(
+                carved.astype(np.uint8), 8
+            )
 
             components: list[tuple[int, int]] = []
             for cc_id in range(1, n_cc):
@@ -488,7 +505,9 @@ class AdaptiveStickerSplitter:
         cc_mask: np.ndarray,
         target_regions: int,
     ) -> np.ndarray | None:
-        outline_thr, seeds = self._derive_outline_seeds(cc_mask, gray_norm, target_regions)
+        outline_thr, seeds = self._derive_outline_seeds(
+            cc_mask, gray_norm, target_regions
+        )
         if seeds is None or outline_thr is None:
             return None
 
@@ -537,7 +556,9 @@ class AdaptiveStickerSplitter:
         for sid, items in seg_usage.items():
             if len(items) == 1:
                 li, center_score, overlap, seg_area, overlap_ratio = items[0]
-                exclusive_pool[li].append((center_score, overlap_ratio, overlap, seg_area, sid))
+                exclusive_pool[li].append(
+                    (center_score, overlap_ratio, overlap, seg_area, sid)
+                )
                 continue
 
             items_sorted = sorted(
@@ -546,7 +567,9 @@ class AdaptiveStickerSplitter:
                 reverse=True,
             )
             li, center_score, overlap, seg_area, overlap_ratio = items_sorted[0]
-            shared_pool[li].append((center_score, overlap_ratio, overlap, seg_area, sid))
+            shared_pool[li].append(
+                (center_score, overlap_ratio, overlap, seg_area, sid)
+            )
 
         seed_regions: dict[int, list[int]] = {}
         for li in seeds:
@@ -583,7 +606,9 @@ class AdaptiveStickerSplitter:
             remapped[labels == old_li] = new_li
         return remapped
 
-    def _candidate_touching_pairs(self, panel_labels: np.ndarray) -> list[tuple[int, int]]:
+    def _candidate_touching_pairs(
+        self, panel_labels: np.ndarray
+    ) -> list[tuple[int, int]]:
         labels = sorted(int(li) for li in np.unique(panel_labels) if li > 0)
         boxes: dict[int, tuple[int, int, int, int, int, int]] = {}
         masks: dict[int, np.ndarray] = {}
@@ -708,10 +733,14 @@ class AdaptiveStickerSplitter:
             return overlap_rows, overlap_width
 
         def frag_penalty(mask: np.ndarray) -> tuple[int, int]:
-            n_cc, _, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
+            n_cc, _, stats, _ = cv2.connectedComponentsWithStats(
+                mask.astype(np.uint8), 8
+            )
             if n_cc <= 2:
                 return 0, 0
-            areas = sorted((int(stats[i, cv2.CC_STAT_AREA]) for i in range(1, n_cc)), reverse=True)
+            areas = sorted(
+                (int(stats[i, cv2.CC_STAT_AREA]) for i in range(1, n_cc)), reverse=True
+            )
             return n_cc - 2, sum(areas[1:])
 
         def candidate_score(labels: np.ndarray) -> tuple[float, int, int, float]:
@@ -782,7 +811,10 @@ class AdaptiveStickerSplitter:
         markers[left_core] = 1
         markers[right_core] = 2
 
-        gray_norm = cv2.cvtColor(image[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+        gray_norm = (
+            cv2.cvtColor(image[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY).astype(np.float32)
+            / 255.0
+        )
         sobel = filters.sobel(gray_norm)
         dark_strength = np.clip((0.22 - gray_norm) / 0.22, 0.0, 1.0)
         elevation = sobel + 4.0 * dark_strength
@@ -968,7 +1000,8 @@ class AdaptiveStickerSplitter:
         markers[bottom_core] = 2
 
         gray_norm = (
-            cv2.cvtColor(image[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+            cv2.cvtColor(image[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY).astype(np.float32)
+            / 255.0
         )
         sobel = filters.sobel(gray_norm)
         dark_strength = np.clip((0.22 - gray_norm) / 0.22, 0.0, 1.0)
@@ -1161,9 +1194,9 @@ class AdaptiveStickerSplitter:
                 score = (
                     (gcx - centroids[li][0]) ** 2
                     + (gcy - centroids[li][1]) ** 2
-                    + (x_overreach ** 2) * 3.0
-                    + (y_gap ** 2) * 0.5
-                    + (y_above ** 2) * 0.2
+                    + (x_overreach**2) * 3.0
+                    + (y_gap**2) * 0.5
+                    + (y_above**2) * 0.2
                 )
 
                 if gy0 > body_y0 + body_h * 0.2 and x_overreach > body_w * 0.18:
@@ -1175,7 +1208,8 @@ class AdaptiveStickerSplitter:
             else:
                 best_li = min(
                     centroids,
-                    key=lambda li: (gcx - centroids[li][0]) ** 2 + (gcy - centroids[li][1]) ** 2,
+                    key=lambda li: (gcx - centroids[li][0]) ** 2
+                    + (gcy - centroids[li][1]) ** 2,
                 )
 
             for i in group:

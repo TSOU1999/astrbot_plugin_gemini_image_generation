@@ -436,7 +436,9 @@ class StickerCutter:
             adaptive = AdaptiveStickerSplitter()
             adaptive_crops, adaptive_debug = adaptive.process_image(img, debug=debug)
             if adaptive_crops:
-                logger.debug(f"使用自适应黑描边分割，共 {len(adaptive_crops)} 个裁剪结果")
+                logger.debug(
+                    f"使用自适应黑描边分割，共 {len(adaptive_crops)} 个裁剪结果"
+                )
                 return adaptive_crops, adaptive_debug
         except Exception as e:
             logger.debug(f"自适应黑描边分割失败，回退主体吸附算法: {e}")
