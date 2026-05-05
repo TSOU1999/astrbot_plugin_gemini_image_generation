@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import os
 from typing import Any
 
 import aiohttp
@@ -35,7 +37,29 @@ class ApimartProvider:
 
         if config.reference_images:
             # Apimart allows up to 16 reference images
-            payload["image_urls"] = config.reference_images[:16]
+            processed_urls = []
+            for img in config.reference_images[:16]:
+                img_str = str(img).strip()
+                if img_str.startswith(("http://", "https://", "data:image/")):
+                    processed_urls.append(img_str)
+                elif os.path.isfile(img_str):
+                    # It's a local file path, read and encode it
+                    try:
+                        with open(img_str, "rb") as f:
+                            b64_data = base64.b64encode(f.read()).decode("utf-8")
+                        # Guess mime type simply from extension, default to png
+                        ext = os.path.splitext(img_str)[1].lower()
+                        mime_type = f"image/{ext[1:]}" if ext in [".png", ".jpg", ".jpeg", ".webp"] else "image/png"
+                        processed_urls.append(f"data:{mime_type};base64,{b64_data}")
+                    except Exception:
+                        pass # Ignore file read errors
+                else:
+                    # It's likely a raw base64 string, prepend the data URI scheme
+                    # Assuming png as default if we don't know
+                    processed_urls.append(f"data:image/png;base64,{img_str}")
+            
+            if processed_urls:
+                payload["image_urls"] = processed_urls
 
         return ProviderRequest(url=url, headers=headers, payload=payload)
 
