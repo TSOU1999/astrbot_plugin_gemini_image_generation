@@ -1572,6 +1572,20 @@ class AdaptiveStickerSplitter:
                 right_li,
                 vertical=False,
             )
+        for li, lj in self._candidate_vertical_touching_pairs(panel_labels):
+            top_li, bottom_li = li, lj
+            cy_i = float(np.where(panel_labels == li)[0].mean())
+            cy_j = float(np.where(panel_labels == lj)[0].mean())
+            if cy_i > cy_j:
+                top_li, bottom_li = lj, li
+            expanded = self._refine_expanded_touching_band(
+                expanded,
+                panel_labels,
+                bgr,
+                top_li,
+                bottom_li,
+                vertical=True,
+            )
 
         crops = self._extract_crops(bgr, expanded, fg_raw, fg_detail)
         self.last_panel_labels = panel_labels

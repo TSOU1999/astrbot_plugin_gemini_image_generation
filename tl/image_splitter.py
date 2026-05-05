@@ -1047,6 +1047,22 @@ def split_image(
             composed = rgb * alpha_3 + bg_color[None, None, :] * (1.0 - alpha_3)
             return np.clip(composed, 0, 255).astype(np.uint8)
 
+        def should_flatten_crop_background(crop: np.ndarray) -> bool:
+            """仅在裁剪结果本身已经是不透明底图时再做背景回填。"""
+            if crop.ndim != 3 or crop.shape[2] != 4:
+                return False
+
+            alpha = crop[:, :, 3]
+            if not np.any(alpha == 0):
+                return False
+
+            # 若透明区域已经是白底占位色，则按原图背景回填为不透明图；
+            # 否则保留 alpha，避免把透明贴纸错误压平成白底 PNG。
+            transparent_rgb = crop[alpha == 0, :3]
+            if len(transparent_rgb) == 0:
+                return False
+            return bool(np.all(transparent_rgb == 255))
+
         def generate_manual_boxes(
             target_rows: int, target_cols: int
         ) -> list[tuple[int, int, int, int]]:
@@ -1155,7 +1171,12 @@ def split_image(
                 for idx, crop in enumerate(sticker_crops, 1):
                     file_name = f"{base_name}_{idx:03d}.png"
                     file_path = final_output_dir / file_name
-                    cv2.imwrite(str(file_path), flatten_crop_background(crop))
+                    output_crop = (
+                        flatten_crop_background(crop)
+                        if should_flatten_crop_background(crop)
+                        else crop
+                    )
+                    cv2.imwrite(str(file_path), output_crop)
                     output_files.append(str(file_path))
                 if sticker_debug is not None:
                     debug_file = final_output_dir / f"{base_name}_debug.png"
