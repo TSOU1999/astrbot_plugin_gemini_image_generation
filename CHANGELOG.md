@@ -2,6 +2,35 @@
 
 > **升级提示**：v1.9.0 以后的配置文件格式不兼容旧版本。升级后如遇配置模板显示错误，请查看 [配置迁移说明](https://github.com/piexian/astrbot_plugin_gemini_image_generation/blob/master/docs/troubleshooting.md#配置迁移说明)。
 
+## [1.10.5] - 2026-05-05
+
+### Fixed
+
+#### 线条切图修复（PR #79，[@vmoranv](https://github.com/vmoranv)）
+
+##### `tl/adaptive_sticker_splitter.py`
+
+- `_nms()`：改用网格哈希桶加速邻近点查找（O(n²) → O(n)），并补全空坐标前置检查，避免小图崩溃
+- `_auto_peaks()`：峰值检测先做连通组件合并再取各组重心，防止相邻像素被误判为多个独立峰
+- `_expand_labels()`：面板扩展 margin 下限从 18 px 降至 6 px，适应小尺寸贴纸；文字归属的四方向放行量（below/right/left/above）改为独立动态计算，避免紧凑小图被误切
+- `_refine_expanded_touching_band()`：加空数组越界守卫；dist_cap/band_pad/min_work 均改为按实际图像尺寸自适应（原均为固定常量）；cost_margin 改为按分位数自适应（原固定 1.5）；movable 区域明确排除 core 像素
+- `_refine_crop_alpha()`：head_band_y / x_margin / min_group_area 的绝对值下限从 60 / 40 / 30 统一降至 6，防止小图 alpha 修剪过激
+- `_extract_crops()`：边缘呼吸空间改为按当前实际边距与目标比例动态补充（原为固定 `touch_band=2 / pad_touch=4` 判断），避免细描边被硬裁出界
+
+##### `tl/image_splitter.py`
+
+- 新增 `trim_viewer_chrome()`：自动识别并裁掉截图中的看图器留白/边框，防止退化为机械等分
+- 新增 `_detect_solid_grid_boxes()`：检测带黑色实线分隔的规则网格表情包（2×2 至 6×6）
+- 新增 `_collect_projection_bands()` / `_build_grid_debug_image()`：投影带提取与网格调试图生成公共助手
+- `split_image()` 切分优先级重写：显式网格检测 → 黑实线网格 → 手动网格 → 黑虚线 4×4 → AI 行列 → SmartMemeSplitter → 自适应贴纸兜底
+- 网格切分结果保存时，有明确分隔线时不再添加 2 px padding，避免切口偏移
+- 新增网格调试图输出（`{base_name}_debug.png`），辅助排查切分结果
+
+### Docs
+
+- `README.md` 贡献鸣谢补充 [@vmoranv](https://github.com/vmoranv) 的"线条切图修复"贡献项
+
+
 ## [1.10.4] - 2026-05-05
 
 ### Added
